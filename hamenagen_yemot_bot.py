@@ -18,7 +18,7 @@ WP_API_BASE = "https://hamenagen.net/wp-json/wp/v2"
 # הקטגוריה שממנה רוצים לשלוף שירים חדשים (לפי התפריט באתר: "שירים חדשים")
 CATEGORY_SLUG = "music-news"
 
-CHECK_INTERVAL = 60  # בודק כל 5 דקות
+CHECK_INTERVAL = 300  # בודק כל 5 דקות
 LAST_ID_FILE = "last_id_hamenagen.txt"
 
 app = Flask(__name__)
@@ -74,35 +74,58 @@ def get_category_id(slug):
 YOUTUBE_PATTERNS = [
     r'youtube\.com/embed/([\w-]{11})',
     r'youtube\.com/watch\?v=([\w-]{11})',
+    r'youtube\.com/shorts/([\w-]{11})',
     r'youtu\.be/([\w-]{11})',
 ]
+DIRECT_MEDIA_PATTERN = r'https?://[^\s"\'<>\\]+?\.(?:mp3|m4a|wav|aac|ogg|mp4|webm)(?:\?[^\s"\'<>\\]*)?'
 
 
-def extract_youtube_id(html_content):
+def find_media_url(html_content):
+    """מחפש בתוכן הפוסט קישור למדיה: יוטיוב, או קובץ שמע/וידאו ישיר.
+    מטפל גם ב-JSON של אלמנטור, שבו הלוכסנים מסומנים כ- \\/ """
+    text = html_content.replace('\\/', '/').replace('&amp;', '&')
+
     for pattern in YOUTUBE_PATTERNS:
-        m = re.search(pattern, html_content)
+        m = re.search(pattern, text)
         if m:
-            return m.group(1)
+            return f"https://www.youtube.com/watch?v={m.group(1)}"
+
+    m = re.search(DIRECT_MEDIA_PATTERN, text, re.IGNORECASE)
+    if m:
+        return m.group(0)
+
+    # דיבוג: מדפיס את כל הקישורים שנמצאו בפוסט כדי להבין איפה המדיה
+    urls = sorted(set(re.findall(r'https?://[^\s"\'<>\\]+', text)))
+    print(f"[debug] לא נמצאה מדיה. קישורים בפוסט ({len(urls)}):")
+    for u in urls[:25]:
+        print(f"[debug]   {u}")
+    tags = sorted(set(re.findall(r'<(iframe|video|audio|source|embed)\b', text, re.I)))
+    print(f"[debug] תגיות מדיה בפוסט: {tags}")
     return None
 
 
-# --- 4. הורדת שמע בלבד מ-YouTube בעזרת yt-dlp ---
-def download_audio_from_youtube(video_id, out_path_no_ext):
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    # דורש התקנה: pip install yt-dlp   וגם ffmpeg מותקן במערכת
+# --- 4. הורדת שמע בלבד בעזרת yt-dlp (יוטיוב או קישור ישיר) ---
+def download_audio(media_url, out_path_no_ext):
     cmd = [
         "yt-dlp",
         "-x", "--audio-format", "mp3",
         "-o", f"{out_path_no_ext}.%(ext)s",
-        url,
     ]
+    # ב-Render אין ffmpeg מותקן - imageio-ffmpeg מספק קובץ הרצה משלו
+    try:
+        import imageio_ffmpeg
+        cmd += ["--ffmpeg-location", imageio_ffmpeg.get_ffmpeg_exe()]
+    except Exception:
+        pass
+    cmd.append(media_url)
+
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         mp3_path = f"{out_path_no_ext}.mp3"
         if os.path.exists(mp3_path):
             return mp3_path
     except subprocess.CalledProcessError as e:
-        print(f"[-] שגיאה בהורדת שמע מיוטיוב: {e.stderr}")
+        print(f"[-] שגיאה בהורדת שמע: {e.stderr}")
     return None
 
 
@@ -122,15 +145,16 @@ def build_song_description(title, excerpt_html):
 
 def process_and_upload(post_id, title, html_content, excerpt_html=""):
     print(f"[*] מעבד פוסט חדש: {title} ({post_id})")
-    video_id = extract_youtube_id(html_content)
+    media_url = find_media_url(html_content)
 
-    if not video_id:
-        print("[-] לא נמצא קישור YouTube בפוסט, מדלג.")
+    if not media_url:
+        print("[-] לא נמצא קישור למדיה בפוסט, מדלג.")
         return
+    print(f"[+] נמצאה מדיה: {media_url}")
 
     # 1. הורדה והעלאת קובץ השמע
     temp_base = f"temp_{post_id}"
-    mp3_path = download_audio_from_youtube(video_id, temp_base)
+    mp3_path = download_audio(media_url, temp_base)
 
     if mp3_path:
         upload_audio_to_yemot(mp3_path, f"{post_id}.mp3")
