@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import threading
 import shutil
@@ -19,7 +20,7 @@ WP_API_BASE = "https://hamenagen.net/wp-json/wp/v2"
 # הקטגוריה שממנה רוצים לשלוף שירים חדשים (לפי התפריט באתר: "שירים חדשים")
 CATEGORY_SLUG = "music-news"
 
-CHECK_INTERVAL = 300  # בודק כל 5 דקות
+CHECK_INTERVAL = 60  # בודק כל 5 דקות
 LAST_ID_FILE = "last_id_hamenagen.txt"
 MAX_ATTEMPTS = 3            # כמה פעמים לנסות פוסט שנכשל לפני שמוותרים
 DESCRIPTION_MAX_CHARS = 1500  # אורך מקסימלי של טקסט ההקראה
@@ -137,7 +138,51 @@ def prepare_cookies_file():
     return None
 
 
+def is_youtube_url(url):
+    return "youtube.com" in url or "youtu.be" in url
+
+
+def get_ffmpeg_exe():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return shutil.which("ffmpeg") or "ffmpeg"
+
+
+def download_direct(url, out_path_no_ext):
+    """הורדת קובץ שמע/וידאו ישיר מהאתר (בלי יוטיוב), והמרה ל-MP3 במידת הצורך."""
+    ext = os.path.splitext(url.split("?")[0])[1].lower() or ".bin"
+    raw_path = f"{out_path_no_ext}_raw{ext}"
+    mp3_path = f"{out_path_no_ext}.mp3"
+    try:
+        headers = dict(HEADERS, Referer="https://hamenagen.net/")
+        with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(raw_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+        if ext == ".mp3":
+            os.replace(raw_path, mp3_path)
+        else:
+            subprocess.run([get_ffmpeg_exe(), "-y", "-i", raw_path, "-vn",
+                            "-acodec", "libmp3lame", "-q:a", "2", mp3_path],
+                           check=True, capture_output=True)
+            os.remove(raw_path)
+        return mp3_path
+    except Exception as e:
+        print(f"[-] שגיאה בהורדת קובץ ישיר: {e}")
+        for path in (raw_path,):
+            if os.path.exists(path):
+                os.remove(path)
+    return None
+
+
 def download_audio(media_url, out_path_no_ext):
+    if not is_youtube_url(media_url):
+        return download_direct(media_url, out_path_no_ext)
+
     cmd = [
         "yt-dlp",
         "-x", "--audio-format", "mp3",
@@ -208,13 +253,58 @@ def get_featured_image_url(post):
     return None
 
 
+def find_media_in_page(post):
+    """המנגן משמיע את השיר באתר עצמו - מחפשים בדף הפוסט קובץ שמע ישיר.
+    מדפיס ללוג את כל המועמדים, כדי שאפשר יהיה לוודא שנבחר הקובץ הנכון."""
+    link = post.get('link')
+    if not link:
+        return None
+    try:
+        r = requests.get(link, headers=HEADERS, timeout=20)
+        text = r.text.replace('\\/', '/').replace('&amp;', '&')
+    except Exception as e:
+        print(f"[-] שגיאה בטעינת דף הפוסט: {e}")
+        return None
+
+    audio_pattern = r'https?://[^\s"\'<>\\]+?\.(?:mp3|m4a|aac|wav|ogg|opus)(?:\?[^\s"\'<>\\]*)?'
+    found = []
+    for m in re.finditer(audio_pattern, text, re.IGNORECASE):
+        if m.group(0) not in found:
+            found.append(m.group(0))
+
+    print(f"[debug] קבצי שמע בדף הפוסט ({len(found)}):")
+    for u in found[:10]:
+        print(f"[debug]   {u}")
+
+    attrs = re.findall(r'(data-[\w-]*(?:audio|mp3|song|track|src|url|file)[\w-]*)="([^"]{5,200})"', text, re.I)
+    if attrs:
+        print(f"[debug] data-attributes רלוונטיים ({len(attrs)}):")
+        for name, val in attrs[:10]:
+            print(f"[debug]   {name} = {val}")
+
+    return found[0] if found else None
+
+
 def find_media_for_post(post):
     # 1. קישור מדיה בתוך תוכן הפוסט (אם יש)
     media_url = find_media_url(post['content']['rendered'])
     if media_url:
         return media_url
 
-    # 2. מזהה יוטיוב לפי שם התמונה הראשית של הפוסט
+    # 2. קובץ שמע שמופיע בשדות אחרים של ה-API של הפוסט
+    blob = json.dumps(post, ensure_ascii=False)
+    m = re.search(DIRECT_MEDIA_PATTERN, blob, re.IGNORECASE)
+    if m:
+        print("[+] נמצא קובץ מדיה בשדות ה-API של הפוסט")
+        return m.group(0)
+
+    # 3. קובץ שמע בדף הפוסט עצמו (הנגן של האתר)
+    media_url = find_media_in_page(post)
+    if media_url:
+        print("[+] נמצא קובץ שמע בדף הפוסט")
+        return media_url
+
+    # 4. גיבוי: מזהה יוטיוב לפי שם התמונה הראשית (עלול להיחסם בשרתי ענן)
     image_url = get_featured_image_url(post)
     print(f"[debug] תמונה ראשית: {image_url}")
     return youtube_url_from_image(image_url)
