@@ -2,6 +2,7 @@ import os
 import re
 import time
 import threading
+import shutil
 import subprocess
 import requests
 from bs4 import BeautifulSoup
@@ -18,7 +19,7 @@ WP_API_BASE = "https://hamenagen.net/wp-json/wp/v2"
 # הקטגוריה שממנה רוצים לשלוף שירים חדשים (לפי התפריט באתר: "שירים חדשים")
 CATEGORY_SLUG = "music-news"
 
-CHECK_INTERVAL = 60  # בודק כל 5 דקות
+CHECK_INTERVAL = 300  # בודק כל 5 דקות
 LAST_ID_FILE = "last_id_hamenagen.txt"
 MAX_ATTEMPTS = 3            # כמה פעמים לנסות פוסט שנכשל לפני שמוותרים
 DESCRIPTION_MAX_CHARS = 1500  # אורך מקסימלי של טקסט ההקראה
@@ -113,6 +114,29 @@ def find_media_url(html_content):
 
 
 # --- 4. הורדת שמע בלבד בעזרת yt-dlp (יוטיוב או קישור ישיר) ---
+COOKIES_SECRET_FILE = "/etc/secrets/cookies.txt"   # Secret File ב-Render
+COOKIES_WORK_FILE = "yt_cookies.txt"
+
+
+def prepare_cookies_file():
+    """יוטיוב חוסם שרתי ענן ("Sign in to confirm you're not a bot").
+    קובץ cookies של חשבון מחובר עוזר לעקוף את זה.
+    מקורות אפשריים: Secret File ב-Render, או משתנה סביבה YOUTUBE_COOKIES.
+    yt-dlp כותב לקובץ, ולכן מעתיקים אותו למקום שניתן לכתיבה."""
+    try:
+        if os.path.exists(COOKIES_SECRET_FILE):
+            shutil.copyfile(COOKIES_SECRET_FILE, COOKIES_WORK_FILE)
+            return COOKIES_WORK_FILE
+        env_cookies = os.environ.get("YOUTUBE_COOKIES", "")
+        if env_cookies.strip():
+            with open(COOKIES_WORK_FILE, "w", encoding="utf-8") as f:
+                f.write(env_cookies)
+            return COOKIES_WORK_FILE
+    except Exception as e:
+        print(f"[-] שגיאה בהכנת קובץ cookies: {e}")
+    return None
+
+
 def download_audio(media_url, out_path_no_ext):
     cmd = [
         "yt-dlp",
@@ -125,6 +149,17 @@ def download_audio(media_url, out_path_no_ext):
         cmd += ["--ffmpeg-location", imageio_ffmpeg.get_ffmpeg_exe()]
     except Exception:
         pass
+
+    # yt-dlp צריך סביבת JavaScript כדי לפענח יוטיוב (node אם קיים בשרת)
+    if shutil.which("node"):
+        cmd += ["--js-runtimes", "node"]
+
+    cookies = prepare_cookies_file()
+    if cookies:
+        cmd += ["--cookies", cookies]
+    else:
+        print("[!] לא הוגדרו cookies של יוטיוב - ייתכן שההורדה תיחסם.")
+
     cmd.append(media_url)
 
     try:
