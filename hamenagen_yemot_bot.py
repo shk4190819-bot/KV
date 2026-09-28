@@ -18,8 +18,16 @@ WP_API_BASE = "https://hamenagen.net/wp-json/wp/v2"
 # הקטגוריה שממנה רוצים לשלוף שירים חדשים (לפי התפריט באתר: "שירים חדשים")
 CATEGORY_SLUG = "music-news"
 
-CHECK_INTERVAL = 300  # בודק כל 5 דקות
+CHECK_INTERVAL = 60  # בודק כל 5 דקות
 LAST_ID_FILE = "last_id_hamenagen.txt"
+MAX_ATTEMPTS = 3            # כמה פעמים לנסות פוסט שנכשל לפני שמוותרים
+DESCRIPTION_MAX_CHARS = 1500  # אורך מקסימלי של טקסט ההקראה
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/html, */*'
+}
 
 app = Flask(__name__)
 
@@ -129,43 +137,95 @@ def download_audio(media_url, out_path_no_ext):
     return None
 
 
-def build_song_description(title, excerpt_html):
-    # ניקוי התיאור (excerpt) מ-HTML לטקסט פשוט
-    clean_excerpt = ""
-    if excerpt_html:
-        soup = BeautifulSoup(excerpt_html, 'html.parser')
-        clean_excerpt = soup.get_text(separator=' ').strip()
-
-    # כותרת הפוסט כוללת בד"כ גם את שם/שמות האמן (לפי הפורמט באתר: "שם השיר - אמן")
-    parts = [title]
-    if clean_excerpt and clean_excerpt not in title:
-        parts.append(clean_excerpt)
-    return " | ".join(parts)
+# באתר, שם קובץ התמונה הראשית של כל שיר מתחיל במזהה היוטיוב שלו,
+# למשל: NCsmsBDRkg4-maxresdefault.jpg  ->  https://www.youtube.com/watch?v=NCsmsBDRkg4
+IMAGE_YT_PATTERN = r'/([\w-]{11})-(?:maxresdefault|sddefault|hqdefault|mqdefault|default)'
 
 
-def process_and_upload(post_id, title, html_content, excerpt_html=""):
+def youtube_url_from_image(image_url):
+    if not image_url:
+        return None
+    m = re.search(IMAGE_YT_PATTERN, image_url)
+    if m:
+        return f"https://www.youtube.com/watch?v={m.group(1)}"
+    return None
+
+
+def get_featured_image_url(post):
+    """כתובת התמונה הראשית של הפוסט: קודם מה-API (_embed), ואז מדף הפוסט (og:image)."""
+    try:
+        media = post.get('_embedded', {}).get('wp:featuredmedia', [])
+        if media and media[0].get('source_url'):
+            return media[0]['source_url']
+    except Exception:
+        pass
+
+    link = post.get('link')
+    if link:
+        try:
+            r = requests.get(link, headers=HEADERS, timeout=20)
+            soup = BeautifulSoup(r.text, 'html.parser')
+            tag = soup.find('meta', property='og:image')
+            if tag and tag.get('content'):
+                return tag['content']
+        except Exception as e:
+            print(f"[-] שגיאה בטעינת דף הפוסט: {e}")
+    return None
+
+
+def find_media_for_post(post):
+    # 1. קישור מדיה בתוך תוכן הפוסט (אם יש)
+    media_url = find_media_url(post['content']['rendered'])
+    if media_url:
+        return media_url
+
+    # 2. מזהה יוטיוב לפי שם התמונה הראשית של הפוסט
+    image_url = get_featured_image_url(post)
+    print(f"[debug] תמונה ראשית: {image_url}")
+    return youtube_url_from_image(image_url)
+
+
+def clean_html_text(html):
+    if not html:
+        return ""
+    text = BeautifulSoup(html, 'html.parser').get_text(separator='\n')
+    lines = [ln.strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def build_song_description(title, content_html, excerpt_html=""):
+    # תוכן הפוסט באתר הוא טקסט התיאור/קרדיטים/מילות השיר
+    body = clean_html_text(content_html) or clean_html_text(excerpt_html)
+    text = title if not body else f"{title}\n{body}"
+    return text[:DESCRIPTION_MAX_CHARS]
+
+
+def process_and_upload(post):
+    """מחזיר True אם השיר הועלה בהצלחה."""
+    post_id = str(post['id'])
+    title = clean_html_text(post['title']['rendered'])
     print(f"[*] מעבד פוסט חדש: {title} ({post_id})")
-    media_url = find_media_url(html_content)
 
+    media_url = find_media_for_post(post)
     if not media_url:
-        print("[-] לא נמצא קישור למדיה בפוסט, מדלג.")
-        return
+        print("[-] לא נמצא קישור למדיה בפוסט.")
+        return False
     print(f"[+] נמצאה מדיה: {media_url}")
 
     # 1. הורדה והעלאת קובץ השמע
-    temp_base = f"temp_{post_id}"
-    mp3_path = download_audio(media_url, temp_base)
-
-    if mp3_path:
-        upload_audio_to_yemot(mp3_path, f"{post_id}.mp3")
-        os.remove(mp3_path)
-    else:
+    mp3_path = download_audio(media_url, f"temp_{post_id}")
+    if not mp3_path:
         print(f"[-] נכשל בהורדת השמע עבור פוסט {post_id}")
-        return  # אין טעם להעלות פרטים בלי שיר בפועל
+        return False  # אין טעם להעלות פרטים בלי שיר בפועל
 
-    # 2. העלאת פרטי השיר (שם + תיאור) כטקסט להקראה (TTS)
-    description = build_song_description(title, excerpt_html)
+    upload_audio_to_yemot(mp3_path, f"{post_id}.mp3")
+    os.remove(mp3_path)
+
+    # 2. העלאת פרטי השיר (שם + תיאור/מילים) כטקסט להקראה (TTS)
+    description = build_song_description(
+        title, post['content']['rendered'], post.get('excerpt', {}).get('rendered', ''))
     upload_text_to_yemot(description, f"{post_id}_details.tts")
+    return True
 
 
 # --- לולאת הבוט ---
@@ -178,20 +238,17 @@ def run_bot():
     else:
         print(f"[!] לא נמצאה קטגוריה '{CATEGORY_SLUG}', ימשוך פוסטים מכל הקטגוריות.")
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*'
-    }
+    attempts = {}
 
     while True:
         try:
             print("מושך נתונים מה-API של hamenagen...")
-            params = {"per_page": 5, "orderby": "date", "order": "desc"}
+            params = {"per_page": 5, "orderby": "date", "order": "desc",
+                      "_embed": "wp:featuredmedia"}
             if category_id:
                 params["categories"] = category_id
 
-            response = requests.get(f"{WP_API_BASE}/posts", headers=headers, params=params, timeout=15)
+            response = requests.get(f"{WP_API_BASE}/posts", headers=HEADERS, params=params, timeout=20)
 
             if response.status_code == 200:
                 posts = response.json()
@@ -199,22 +256,22 @@ def run_bot():
                 if posts:
                     latest_post = posts[0]
                     post_id = str(latest_post['id'])
-                    title = latest_post['title']['rendered']
-                    raw_html = latest_post['content']['rendered']
-                    excerpt_html = latest_post.get('excerpt', {}).get('rendered', '')
 
                     saved_id = ""
                     if os.path.exists(LAST_ID_FILE):
                         with open(LAST_ID_FILE, "r") as f:
                             saved_id = f.read().strip()
 
-                    if post_id != saved_id:
-                        print(f"!!! פוסט חדש זוהה: {post_id} - {title} !!!")
-                        process_and_upload(post_id, title, raw_html, excerpt_html)
-                        with open(LAST_ID_FILE, "w") as f:
-                            f.write(post_id)
-                    else:
+                    if post_id == saved_id:
                         print(f"אין פוסטים חדשים (האחרון שנסרק: {saved_id}).")
+                    elif attempts.get(post_id, 0) >= MAX_ATTEMPTS:
+                        print(f"פוסט {post_id} נכשל {MAX_ATTEMPTS} פעמים, ממתין לפוסט הבא.")
+                    else:
+                        print(f"!!! פוסט חדש זוהה: {post_id} !!!")
+                        attempts[post_id] = attempts.get(post_id, 0) + 1
+                        if process_and_upload(latest_post):
+                            with open(LAST_ID_FILE, "w") as f:
+                                f.write(post_id)
                 else:
                     print("ה-API לא החזיר פוסטים.")
             else:
