@@ -180,30 +180,35 @@ def download_direct(url, out_path_no_ext):
 
 
 def download_audio(media_url, out_path_no_ext):
-    if not is_youtube_url(media_url):
+    if not media_url.startswith(("http://", "https://")) and not media_url.startswith("scsearch"):
+        return None
+
+    if not is_youtube_url(media_url) and not media_url.startswith("scsearch"):
+        # קישור ישיר לקובץ (mp3/m4a/mp4 וכו') מהאתר עצמו
         return download_direct(media_url, out_path_no_ext)
 
+    # יוטיוב או חיפוש בסאונדקלאוד - שניהם עוברים דרך yt-dlp
     cmd = [
         "yt-dlp",
         "-x", "--audio-format", "mp3",
+        "--no-playlist",
         "-o", f"{out_path_no_ext}.%(ext)s",
     ]
-    # ב-Render אין ffmpeg מותקן - imageio-ffmpeg מספק קובץ הרצה משלו
     try:
         import imageio_ffmpeg
         cmd += ["--ffmpeg-location", imageio_ffmpeg.get_ffmpeg_exe()]
     except Exception:
         pass
 
-    # yt-dlp צריך סביבת JavaScript כדי לפענח יוטיוב (node אם קיים בשרת)
     if shutil.which("node"):
         cmd += ["--js-runtimes", "node"]
 
-    cookies = prepare_cookies_file()
-    if cookies:
-        cmd += ["--cookies", cookies]
-    else:
-        print("[!] לא הוגדרו cookies של יוטיוב - ייתכן שההורדה תיחסם.")
+    if is_youtube_url(media_url):
+        cookies = prepare_cookies_file()
+        if cookies:
+            cmd += ["--cookies", cookies]
+        else:
+            print("[!] לא הוגדרו cookies של יוטיוב - ייתכן שההורדה תיחסם.")
 
     cmd.append(media_url)
 
@@ -217,9 +222,11 @@ def download_audio(media_url, out_path_no_ext):
     return None
 
 
-# באתר, שם קובץ התמונה הראשית של כל שיר מתחיל במזהה היוטיוב שלו,
-# למשל: NCsmsBDRkg4-maxresdefault.jpg  ->  https://www.youtube.com/watch?v=NCsmsBDRkg4
-IMAGE_YT_PATTERN = r'/([\w-]{11})-(?:maxresdefault|sddefault|hqdefault|mqdefault|default)'
+def search_soundcloud(query, out_path_no_ext):
+    """מחפש את השיר בסאונדקלאוד ומוריד את התוצאה הראשונה.
+    לא דורש cookies, ולכן לא אמור להיחסם כמו יוטיוב."""
+    print(f"[*] מחפש בסאונדקלאוד: {query}")
+    return download_audio(f"scsearch1:{query}", out_path_no_ext)
 
 
 def youtube_url_from_image(image_url):
@@ -332,15 +339,25 @@ def process_and_upload(post):
     print(f"[*] מעבד פוסט חדש: {title} ({post_id})")
 
     media_url = find_media_for_post(post)
-    if not media_url:
-        print("[-] לא נמצא קישור למדיה בפוסט.")
-        return False
-    print(f"[+] נמצאה מדיה: {media_url}")
+    temp_base = f"temp_{post_id}"
+    mp3_path = None
 
-    # 1. הורדה והעלאת קובץ השמע
-    mp3_path = download_audio(media_url, f"temp_{post_id}")
+    # 1. אם יש קישור ישיר (לא יוטיוב) - הוא הכי אמין, מנסים אותו קודם
+    if media_url and not is_youtube_url(media_url):
+        print(f"[+] נמצאה מדיה ישירה: {media_url}")
+        mp3_path = download_audio(media_url, temp_base)
+
+    # 2. חיפוש בסאונדקלאוד לפי שם השיר - לא נחסם כמו יוטיוב
     if not mp3_path:
-        print(f"[-] נכשל בהורדת השמע עבור פוסט {post_id}")
+        mp3_path = search_soundcloud(title, temp_base)
+
+    # 3. גיבוי אחרון: יוטיוב (עלול להיחסם בלי cookies)
+    if not mp3_path and media_url and is_youtube_url(media_url):
+        print(f"[+] מנסה מיוטיוב: {media_url}")
+        mp3_path = download_audio(media_url, temp_base)
+
+    if not mp3_path:
+        print(f"[-] נכשל בהורדת השמע עבור פוסט {post_id} מכל המקורות.")
         return False  # אין טעם להעלות פרטים בלי שיר בפועל
 
     upload_audio_to_yemot(mp3_path, f"{post_id}.mp3")
