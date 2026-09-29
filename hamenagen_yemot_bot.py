@@ -396,9 +396,50 @@ def clean_html_text(html):
     return "\n".join(ln for ln in lines if ln)
 
 
+# --- ניקוי טקסט להקראה (TTS) ---
+REMOVE_CREDITS = False  # False = הקרדיטים (מילים, לחן, צילום וכו') נשארים בהקראה
+
+# שורות שהן זבל של האתר (נמחקות אם השורה כולה זהה להן)
+JUNK_LINES = {
+    "פרסומת", "דילוג על הפרסומת", "יחצ", "יח\"צ", "גרסת שמע", "גרסת שמע:",
+    "הגב", "שתף", "קרא עוד", "קראו עוד", "כתבות נוספות בנושא", "לצפייה בקליפ",
+    "לצפיה בקליפ", "לשמיעה", "להאזנה",
+}
+# שורות שמתחילות באחד מאלה נמחקות
+JUNK_PREFIXES = ["גרסת שמע", "כתבות נוספות"]
+if REMOVE_CREDITS:
+    JUNK_PREFIXES += ["קרדיטים", "קרדיט", "צילום:", "יחסי ציבור", "יחצ"]
+
+URL_RE = re.compile(r'https?://\S+|www\.\S+', re.I)
+SYMBOLS_RE = re.compile(r'[|•·*_#~^<>\[\]{}\\/=+@]|[\U0001F000-\U0001FFFF\u2600-\u27BF]')
+
+
+def clean_tts_text(text):
+    """מנקה טקסט כך שיהיה ראוי להקראה: בלי קישורים, סמלים, אימוג'י ושורות זבל של האתר."""
+    out = []
+    for line in text.splitlines():
+        line = URL_RE.sub("", line)
+        line = line.replace("|", ",")  # מפריד קרדיטים -> הפסקה קלה בהקראה
+        line = SYMBOLS_RE.sub(" ", line)
+        line = re.sub(r'\s+', ' ', line).strip()
+        if not line:
+            continue
+        bare = line.strip(" :.-–—")
+        if bare in JUNK_LINES or line in JUNK_LINES:
+            continue
+        if any(line.startswith(pref) for pref in JUNK_PREFIXES):
+            continue
+        # שורה שנשארה בלי אותיות (רק סימנים/מספרים) - אין מה להקריא
+        if not re.search(r'[A-Za-z\u0590-\u05FF]', line):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def build_song_description(title, content_html, excerpt_html=""):
     # תוכן הפוסט באתר הוא טקסט התיאור/קרדיטים/מילות השיר
-    body = clean_html_text(content_html) or clean_html_text(excerpt_html)
+    body = clean_tts_text(clean_html_text(content_html) or clean_html_text(excerpt_html))
+    title = clean_tts_text(title)
     text = title if not body else f"{title}\n{body}"
     return text[:DESCRIPTION_MAX_CHARS]
 
