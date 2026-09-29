@@ -20,7 +20,7 @@ WP_API_BASE = "https://www.jdn.co.il/wp-json/wp/v2"
 # הקטגוריה שממנה רוצים לשלוף שירים חדשים (מדור "מוזיקה" באתר)
 CATEGORY_SLUG = "music"
 
-CHECK_INTERVAL = 60  # בודק כל 5 דקות
+CHECK_INTERVAL = 60  # בודק כל דקה
 LAST_ID_FILE = "last_id_hamenagen.txt"
 MAX_ATTEMPTS = 3            # כמה פעמים לנסות פוסט שנכשל לפני שמוותרים
 DESCRIPTION_MAX_CHARS = 1500  # אורך מקסימלי של טקסט ההקראה
@@ -39,7 +39,53 @@ def home():
     return "Hamenagen -> Yemot Bot is running!"
 
 
-# --- 1. העלאת קובץ שמע (MP3) לימות המשיח ---
+# --- 0. עזרים: המרה ל-WAV ומספור רץ ---
+COOKIES_SECRET_FILE = "/etc/secrets/cookies.txt"   # Secret File ב-Render
+COOKIES_WORK_FILE = "yt_cookies.txt"
+
+
+def get_ffmpeg_exe():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return shutil.which("ffmpeg") or "ffmpeg"
+
+
+def convert_to_wav(src_path, out_path):
+    """ממיר כל קובץ (שמע/וידאו) ל-WAV בפורמט שימות המשיח מנגנת:
+    מונו, 8000Hz, 16bit PCM. -vn מוריד את זרם הוידאו."""
+    try:
+        subprocess.run([get_ffmpeg_exe(), "-y", "-i", src_path, "-vn",
+                        "-ac", "1", "-ar", "8000", "-acodec", "pcm_s16le",
+                        out_path],
+                       check=True, capture_output=True)
+        return out_path
+    except Exception as e:
+        print(f"[-] שגיאה בהמרה ל-WAV: {e}")
+        return None
+
+
+def get_next_file_number():
+    """מחזיר את המספר הבא בשלוחה (המספר הגבוה ביותר + 1), בפורמט 3 ספרות.
+    אם לא הצלחנו לקרוא את השלוחה - מחזיר None כדי לא לדרוס קבצים קיימים."""
+    try:
+        r = requests.get("https://www.call2all.co.il/ym/api/GetIVR2Dir",
+                         params={"token": YEMOT_TOKEN, "path": EXTENSION_PATH},
+                         timeout=20)
+        data = r.json()
+        nums = []
+        for f in data.get("files", []):
+            m = re.match(r'^(\d+)\.', f.get("name", ""))
+            if m:
+                nums.append(int(m.group(1)))
+        return f"{(max(nums) + 1) if nums else 0:03d}"
+    except Exception as e:
+        print(f"[-] שגיאה בקריאת רשימת הקבצים בשלוחה: {e}")
+        return None
+
+
+# --- 1. העלאת קובץ שמע (WAV) לימות המשיח ---
 def upload_audio_to_yemot(file_path, file_name):
     url = "https://www.call2all.co.il/ym/api/UploadFile"
     full_path = f"{EXTENSION_PATH}/{file_name}"
@@ -114,11 +160,7 @@ def find_media_url(html_content):
     return None
 
 
-# --- 4. הורדת שמע בלבד בעזרת yt-dlp (יוטיוב או קישור ישיר) ---
-COOKIES_SECRET_FILE = "/etc/secrets/cookies.txt"   # Secret File ב-Render
-COOKIES_WORK_FILE = "yt_cookies.txt"
-
-
+# --- 4. הורדת שמע בעזרת yt-dlp (יוטיוב או קישור ישיר) ---
 def prepare_cookies_file():
     """יוטיוב חוסם שרתי ענן ("Sign in to confirm you're not a bot").
     קובץ cookies של חשבון מחובר עוזר לעקוף את זה.
@@ -142,16 +184,9 @@ def is_youtube_url(url):
     return "youtube.com" in url or "youtu.be" in url
 
 
-def get_ffmpeg_exe():
-    try:
-        import imageio_ffmpeg
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return shutil.which("ffmpeg") or "ffmpeg"
-
-
 def download_direct(url, out_path_no_ext):
-    """הורדת קובץ שמע/וידאו ישיר מהאתר (בלי יוטיוב), והמרה ל-MP3 במידת הצורך."""
+    """הורדת קובץ שמע/וידאו ישיר מהאתר (בלי יוטיוב), והמרה ל-MP3 במידת הצורך.
+    (ההמרה הסופית ל-WAV נעשית אחר כך ב-process_and_upload)"""
     ext = os.path.splitext(url.split("?")[0])[1].lower() or ".bin"
     raw_path = f"{out_path_no_ext}_raw{ext}"
     mp3_path = f"{out_path_no_ext}.mp3"
@@ -365,13 +400,26 @@ def process_and_upload(post):
         print(f"[-] נכשל בהורדת השמע עבור פוסט {post_id} מכל המקורות.")
         return False  # אין טעם להעלות פרטים בלי שיר בפועל
 
-    upload_audio_to_yemot(mp3_path, f"{post_id}.mp3")
-    os.remove(mp3_path)
+    # המרה ל-WAV שימות המשיח מנגנת (מונו, 8kHz, בלי וידאו)
+    wav_path = convert_to_wav(mp3_path, f"{temp_base}.wav")
+    if os.path.exists(mp3_path):
+        os.remove(mp3_path)
+    if not wav_path:
+        return False
 
-    # 2. העלאת פרטי השיר (שם + תיאור/מילים) כטקסט להקראה (TTS)
+    # מספר רץ: הבא אחרי הגבוה ביותר בשלוחה
+    number = get_next_file_number()
+    if number is None:
+        os.remove(wav_path)
+        return False
+
+    upload_audio_to_yemot(wav_path, f"{number}.wav")
+    os.remove(wav_path)
+
+    # פרטי השיר (שם + תיאור/מילים) כטקסט להקראה (TTS) עם אותו מספר
     description = build_song_description(
         title, post['content']['rendered'], post.get('excerpt', {}).get('rendered', ''))
-    upload_text_to_yemot(description, f"{post_id}_details.tts")
+    upload_text_to_yemot(description, f"{number}.tts")
     return True
 
 
@@ -389,7 +437,7 @@ def run_bot():
 
     while True:
         try:
-            print("מושך נתונים מה-API של hamenagen...")
+            print("מושך נתונים מה-API של jdn...")
             params = {"per_page": 5, "orderby": "date", "order": "desc",
                       "_embed": "wp:featuredmedia"}
             if category_id:
