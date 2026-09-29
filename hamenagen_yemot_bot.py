@@ -20,7 +20,7 @@ WP_API_BASE = "https://hamenagen.net/wp-json/wp/v2"
 # הקטגוריה שממנה רוצים לשלוף שירים חדשים (לפי התפריט באתר: "שירים חדשים")
 CATEGORY_SLUG = "music-news"
 
-CHECK_INTERVAL = 60  # בודק כל 5 דקות
+CHECK_INTERVAL = 300  # בודק כל 5 דקות
 LAST_ID_FILE = "last_id_hamenagen.txt"
 MAX_ATTEMPTS = 3            # כמה פעמים לנסות פוסט שנכשל לפני שמוותרים
 DESCRIPTION_MAX_CHARS = 1500  # אורך מקסימלי של טקסט ההקראה
@@ -227,6 +227,11 @@ def search_soundcloud(query, out_path_no_ext):
     לא דורש cookies, ולכן לא אמור להיחסם כמו יוטיוב."""
     print(f"[*] מחפש בסאונדקלאוד: {query}")
     return download_audio(f"scsearch1:{query}", out_path_no_ext)
+
+
+# באתר, שם קובץ התמונה הראשית של כל שיר מתחיל במזהה היוטיוב שלו,
+# למשל: NCsmsBDRkg4-maxresdefault.jpg  ->  https://www.youtube.com/watch?v=NCsmsBDRkg4
+IMAGE_YT_PATTERN = r'/([\w-]{11})-(?:maxresdefault|sddefault|hqdefault|mqdefault|default)'
 
 
 def youtube_url_from_image(image_url):
