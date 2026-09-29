@@ -15,12 +15,12 @@ from flask import Flask
 YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "")
 EXTENSION_PATH = os.environ.get("EXTENSION_PATH", "ivr2:/5")
 
-# בסיס ה-API של וורדפרס באתר החדש
-WP_API_BASE = "https://hamenagen.net/wp-json/wp/v2"
-# הקטגוריה שממנה רוצים לשלוף שירים חדשים (לפי התפריט באתר: "שירים חדשים")
-CATEGORY_SLUG = "music-news"
+# בסיס ה-API של וורדפרס - JDN (jdn.co.il) במקום hamenagen.net
+WP_API_BASE = "https://www.jdn.co.il/wp-json/wp/v2"
+# הקטגוריה שממנה רוצים לשלוף שירים חדשים (מדור "מוזיקה" באתר)
+CATEGORY_SLUG = "music"
 
-CHECK_INTERVAL = 300  # בודק כל 5 דקות
+CHECK_INTERVAL = 60  # בודק כל 5 דקות
 LAST_ID_FILE = "last_id_hamenagen.txt"
 MAX_ATTEMPTS = 3            # כמה פעמים לנסות פוסט שנכשל לפני שמוותרים
 DESCRIPTION_MAX_CHARS = 1500  # אורך מקסימלי של טקסט ההקראה
@@ -156,7 +156,7 @@ def download_direct(url, out_path_no_ext):
     raw_path = f"{out_path_no_ext}_raw{ext}"
     mp3_path = f"{out_path_no_ext}.mp3"
     try:
-        headers = dict(HEADERS, Referer="https://hamenagen.net/")
+        headers = dict(HEADERS, Referer="https://www.jdn.co.il/")
         with requests.get(url, headers=headers, stream=True, timeout=60) as r:
             r.raise_for_status()
             with open(raw_path, "wb") as f:
@@ -377,7 +377,7 @@ def process_and_upload(post):
 
 # --- לולאת הבוט ---
 def run_bot():
-    print("--- הבוט הופעל ברקע (מול hamenagen.net) ---")
+    print("--- הבוט הופעל ברקע (מול jdn.co.il) ---")
 
     category_id = get_category_id(CATEGORY_SLUG)
     if category_id:
