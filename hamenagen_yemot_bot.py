@@ -66,40 +66,69 @@ def convert_to_wav(src_path, out_path):
         return None
 
 
-def get_next_file_number():
-    """מחזיר את המספר הבא בשלוחה (המספר הגבוה ביותר + 1), בפורמט 3 ספרות.
-    אם לא הצלחנו לקרוא את השלוחה - מחזיר None כדי לא לדרוס קבצים קיימים."""
+def is_valid_yemot_wav(path):
+    """בודק שהקובץ הוא WAV בפורמט שימות מנגנת: PCM, מונו, 8000Hz, 16bit, ולא ריק."""
+    import wave
+    try:
+        with wave.open(path, "rb") as w:
+            return (w.getnchannels() == 1 and w.getframerate() == 8000
+                    and w.getsampwidth() == 2 and w.getnframes() > 0)
+    except Exception as e:
+        print(f"[-] הקובץ אינו WAV תקין: {e}")
+        return False
+
+
+def get_next_free_number():
+    """מחזיר את המספר הפנוי הבא בשלוחה (הגבוה ביותר מכל סוג קובץ + 1), באותו רוחב ספרות.
+    משמש לקובץ הטקסט, שהוא קובץ נפרד שבא אחרי קובץ השמע."""
     try:
         r = requests.get("https://www.call2all.co.il/ym/api/GetIVR2Dir",
                          params={"token": YEMOT_TOKEN, "path": EXTENSION_PATH},
                          timeout=20)
         data = r.json()
-        nums = []
+        best, width = -1, 3
         for f in data.get("files", []):
             m = re.match(r'^(\d+)\.', f.get("name", ""))
             if m:
-                nums.append(int(m.group(1)))
-        return f"{(max(nums) + 1) if nums else 0:03d}"
+                n = int(m.group(1))
+                if n > best:
+                    best, width = n, len(m.group(1))
+        if best < 0:
+            return None
+        return str(best + 1).zfill(width)
     except Exception as e:
         print(f"[-] שגיאה בקריאת רשימת הקבצים בשלוחה: {e}")
         return None
 
 
 # --- 1. העלאת קובץ שמע (WAV) לימות המשיח ---
-def upload_audio_to_yemot(file_path, file_name):
+def upload_audio_to_yemot(file_path, file_name=None):
+    """מעלה WAV בלבד. בלי file_name - שולחים רק את השלוחה וימות נותנת שם אוטומטי (הבא בתור)."""
+    if not file_path.lower().endswith(".wav"):
+        print(f"[-] חסום: שמע מועלה רק כ-WAV ({file_path})")
+        return False
     url = "https://www.call2all.co.il/ym/api/UploadFile"
-    full_path = f"{EXTENSION_PATH}/{file_name}"
+    full_path = f"{EXTENSION_PATH}/{file_name}" if file_name else f"{EXTENSION_PATH}/"
     params = {"token": YEMOT_TOKEN, "path": full_path}
     try:
         with open(file_path, 'rb') as f:
             response = requests.post(url, data=params, files={'file': f})
         print(f"[+] תשובת שרת ימות (העלאת שמע): {response.text}")
+        try:
+            return response.json().get("responseStatus", "OK") == "OK"
+        except Exception:
+            return response.ok
     except Exception as e:
         print(f"[-] שגיאה בהעלאת שמע: {e}")
+        return False
 
 
 # --- 2. העלאת טקסט (TTS) לימות המשיח - לצורך הקראת פרטי השיר ---
 def upload_text_to_yemot(text_content, file_name):
+    # טקסט עולה אך ורק כ-TTS
+    if not file_name.lower().endswith(".tts"):
+        print(f"[-] חסום: טקסט מועלה רק כ-TTS ({file_name})")
+        return False
     url = "https://www.call2all.co.il/ym/api/UploadTextFile"
     full_path = f"{EXTENSION_PATH}/{file_name}"
     params = {
@@ -110,8 +139,10 @@ def upload_text_to_yemot(text_content, file_name):
     try:
         response = requests.post(url, data=params)
         print(f"[+] תשובת שרת ימות (העלאת טקסט): {response.text}")
+        return True
     except Exception as e:
         print(f"[-] שגיאה בהעלאת טקסט: {e}")
+        return False
 
 
 # --- 2.5 מציאת מזהה קטגוריה לפי slug (פעם אחת, בהפעלה) ---
@@ -407,16 +438,24 @@ def process_and_upload(post):
     if not wav_path:
         return False
 
-    # מספר רץ: הבא אחרי הגבוה ביותר בשלוחה
-    number = get_next_file_number()
-    if number is None:
+    # מעלים רק אם הקובץ בפורמט המתאים לימות המשיח
+    if not is_valid_yemot_wav(wav_path):
+        print(f"[-] הפורמט לא מתאים, לא מעלה את פוסט {post_id}.")
         os.remove(wav_path)
         return False
 
-    upload_audio_to_yemot(wav_path, f"{number}.wav")
+    # העלאה בלי שם - ימות המשיח נותנת שם אוטומטי (הבא בתור)
+    ok = upload_audio_to_yemot(wav_path)
     os.remove(wav_path)
+    if not ok:
+        return False
 
-    # פרטי השיר (שם + תיאור/מילים) כטקסט להקראה (TTS) עם אותו מספר
+    # קובץ הטקסט (TTS) הוא קובץ נפרד - המספר הפנוי הבא אחרי קובץ השמע
+    number = get_next_free_number()
+    if number is None:
+        print("[!] השמע עלה, אך לא ניתן היה לדעת את המספר הפנוי הבא - קובץ ה-TTS לא הועלה.")
+        return True
+
     description = build_song_description(
         title, post['content']['rendered'], post.get('excerpt', {}).get('rendered', ''))
     upload_text_to_yemot(description, f"{number}.tts")
