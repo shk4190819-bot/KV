@@ -94,7 +94,7 @@ def get_next_free_number():
                 if n > best:
                     best, width = n, len(m.group(1))
         if best < 0:
-            return None
+            return "000"  # שלוחה ריקה - מתחילים מ-000
         return str(best + 1).zfill(width)
     except Exception as e:
         print(f"[-] שגיאה בקריאת רשימת הקבצים בשלוחה: {e}")
@@ -444,17 +444,20 @@ def process_and_upload(post):
         os.remove(wav_path)
         return False
 
-    # העלאה בלי שם - ימות המשיח נותנת שם אוטומטי (הבא בתור)
-    ok = upload_audio_to_yemot(wav_path)
+    # ימות לא מקבלת נתיב בלי שם קובץ ("path is invalid"), ולכן בודקים בשלוחה
+    # מה המספר הפנוי הבא (כולל שירים שהועלו ידנית) ומעלים עם המספר הזה
+    audio_number = get_next_free_number()
+    if audio_number is None:
+        os.remove(wav_path)
+        return False
+
+    ok = upload_audio_to_yemot(wav_path, f"{audio_number}.wav")
     os.remove(wav_path)
     if not ok:
         return False
 
-    # קובץ הטקסט (TTS) הוא קובץ נפרד - המספר הפנוי הבא אחרי קובץ השמע
-    number = get_next_free_number()
-    if number is None:
-        print("[!] השמע עלה, אך לא ניתן היה לדעת את המספר הפנוי הבא - קובץ ה-TTS לא הועלה.")
-        return True
+    # קובץ הטקסט (TTS) הוא קובץ נפרד - המספר שאחרי קובץ השמע
+    number = str(int(audio_number) + 1).zfill(len(audio_number))
 
     description = build_song_description(
         title, post['content']['rendered'], post.get('excerpt', {}).get('rendered', ''))
